@@ -127,7 +127,7 @@ def broadcast_over_diagonal_chrom(model: callable,
     carry = np.ones(overlap)
     step_size = shape - overlap
     number_of_iterations = int(np.ceil((mat.shape[0]-shape) / step_size)) + 1
-    print("Fitting the model on the patches from the diagonal of the HiC matrix")
+    print("Fitting the model on patches from the diagonal of the HiC matrix")
     any_patch_fail = False
     for i in progressbar(range(number_of_iterations)):
         start, end = i * step_size, min(i * step_size + shape, mat.shape[0])

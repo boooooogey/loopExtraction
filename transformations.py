@@ -14,7 +14,8 @@ def log_transform(mat: ArrayLike) -> ArrayLike:
     Returns:
         ArrayLike: Transformed patch.
     """
-    mat = np.log(mat)
+    with np.errstate(divide='ignore'):
+        mat = np.log(mat)
     mat_min = np.min(mat[np.logical_not(np.isinf(mat))])
     mat = mat - mat_min
     mat[np.isinf(mat)] = PATCH_MIN
