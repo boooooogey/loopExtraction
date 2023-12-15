@@ -2,7 +2,7 @@
 """
 import sys
 import time
-from typing import Tuple, Generator
+from typing import Tuple, Generator, Union
 from pandas import DataFrame
 from jax.typing import ArrayLike
 import jax.numpy as jnp
@@ -38,8 +38,21 @@ def progressbar(it, prefix="", size:int = 60, out=sys.stdout):
         show(i+1)
     print("\n", flush=True, file=out)
 
+def triu_indexing(n:int, start:int, end:int) -> ArrayLike:
+    """Return the indices from the start diagonal until the end diagonal of a n x n matrix.
+
+    Args:
+        n (int): dimension of the matrix.
+        start (int): start diagonal index.
+        end (int): end diagonal index 
+
+    Returns:
+        ArrayLike: indices for the elements on the region from start to end diagonal.
+    """
+    return jnp.where(~jnp.tri(n, n, start-1, dtype=bool) & jnp.tri(n, n, end-1, dtype=bool))
+
 def fit_patch(patch: ArrayLike,
-              carry: ArrayLike,
+              carry: Union[None, ArrayLike],
               f_df_dx: callable,
               model_init: callable,
               n_iter: int = 2000,
@@ -49,9 +62,10 @@ def fit_patch(patch: ArrayLike,
 
     Args:
         patch (ArrayLike): Patch along the diagonal of a HiC matrix.
-        carry (ArrayLike): pass message from the previous message.
+        carry (Union[None, ArrayLike]): pass message from the previous message.
         f_df_dx (callable): a function that returns value and gradient of a loss function.
         model_init (callable): a function that initiate the model for the patch.
+        training_ii (ArrayLike): indices for the training. Only minimize the loss on these indices.
         n_iter (int, optional): the number of iterations before the function terminates. Defaults to
                                 2000.
         learning_rate (float, optional): Learning rate for the training. Defaults to 1e-1.
@@ -64,13 +78,11 @@ def fit_patch(patch: ArrayLike,
                                                        not.
     """
 
-    patch, carry = (jnp.array(i) for i in (patch, carry))
-    params = model_init(patch)
+    patch = jnp.array(patch)
+    if carry is not None:
+        carry = jnp.array(carry)
 
-    init_multiplier_stickiness = jnp.ones(patch.shape[0])
-    init_multiplier_stickiness.at[:len(carry)].set(jnp.sign(carry))
-
-    params = model_init(patch, init_multiplier_stickiness)
+    params = model_init(patch, carry)
     optimizer = optax.adamw(learning_rate)
 
     # Initialize parameters of the model + optimizer.
@@ -91,7 +103,7 @@ def fit_patch(patch: ArrayLike,
             converged = True
             break
 
-    return (np.array(i) for i in params_best), converged 
+    return (np.array(i) for i in params_best), converged
 
 def broadcast_over_diagonal_chrom(model: callable,
                                   patch_transformation: callable,
@@ -100,7 +112,9 @@ def broadcast_over_diagonal_chrom(model: callable,
                                   overlap: int,
                                   path: str,
                                   chrom_name: str,
-                                  bin_size: int) -> DataFrame:
+                                  bin_size: int,
+                                  diag_start: int,
+                                  diag_end: int) -> DataFrame:
     """ Broadcast fit_hic over chromosome
 
     Args:
@@ -112,19 +126,23 @@ def broadcast_over_diagonal_chrom(model: callable,
         path (str): file path to save the parameters.
         chrom_name (str): name of the chromosome.
         bin_size (int): size of a bin in the hic matrix.
+        diag_start (int): the first diagonal to be included in training. 
+        diag_end (int): the final diagonal to be included in training.
 
     Returns:
         Returns the fitted parameters for the whole chromosome.
     """
     print("Initiliazing the parameters...")
-    f_df_dx, model_init, model_init_whole, parameter_transformation, write_parameters, pass_carry = model()
+    #training_ii = triu_indexing(shape, diag_start, diag_end)
+    f_df_dx, model_init, model_init_whole, parameter_transformation, \
+    write_parameters, pass_carry = model(diag_start, diag_end)
     if np.any(np.isnan(mat)):
         mat[np.isnan(mat)] = 0
     nonzero_mask = np.where(np.sum(mat, axis=0) != 0)[0]
     #initiliaze the parameters for the whole chromosome
     parameters = model_init_whole(mat.shape[0])
     mat = mat[np.ix_(nonzero_mask, nonzero_mask)]
-    carry = np.ones(overlap)
+    carry = None #np.ones(overlap)
     step_size = shape - overlap
     number_of_iterations = int(np.ceil((mat.shape[0]-shape) / step_size)) + 1
     print("Fitting the model on patches from the diagonal of the HiC matrix")

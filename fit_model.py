@@ -16,6 +16,10 @@ parser.add_argument("--overlap", default=200, type=int,
                     help="The overlap size between consecutive patches.")
 parser.add_argument("--transformation", default="identity", type=str,
                     help="Transformation for each patch.")
+parser.add_argument("--diag-start", default=1, type=int,
+                    help="First diagonal index to be included in training.")
+parser.add_argument("--diag-end", default=None, type=int,
+                    help="Last diagonal index to be included in training.")
 
 args = parser.parse_args()
 
@@ -27,6 +31,9 @@ if args.transformation == "identity":
 else:
     transformation = getattr(import_module("transformations"), args.transformation)
 
+if args.diag_end is None:
+    args.diag_end = args.window_size
+
 data = np.load(args.HiC)
 parameters = broadcast_over_diagonal_chrom(model,
                                            transformation,
@@ -35,4 +42,6 @@ parameters = broadcast_over_diagonal_chrom(model,
                                            args.overlap,
                                            args.model_output,
                                            args.chromosome_name,
-                                           args.bin_size)
+                                           args.bin_size,
+                                           args.diag_start,
+                                           args.diag_end)

@@ -12,7 +12,7 @@ from pandas import DataFrame
 
 Parameters = Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike, ArrayLike, ArrayLike]
 
-def model():
+def model(diag_start:int, diag_end:int):
     """Returns needed functions to fit the model on a hic matrix of a single chromosome.
     """
 
@@ -36,11 +36,10 @@ def model():
 
         dfpar = pd.DataFrame(np.vstack(parameters).T,
                   columns=["u_0", "p_right", "p_left", "lambda", "lambda_background", "stickiness"])
-        dfpar["start"] = start
-        dfpar["end"] = end
-        dfpar["chrom"] = chrom_name
+        dfpar.insert(0, "end", end)
+        dfpar.insert(0, "start", start)
+        dfpar.insert(0, "chrom", chrom_name)
 
-        dfpar = dfpar.iloc[:, [8, 6, 7] + list(range(6))]
         dfpar.to_csv(path, sep="\t", index=False)
         return dfpar
 
@@ -90,7 +89,7 @@ def model():
         return hic
 
     def model_init(mat:ArrayLike,
-                   stickiness_carry:Union[ArrayLike, None] = None) -> Parameters:
+                         stickiness_carry:Union[ArrayLike, None] = None) -> Parameters:
         width = mat.shape[0]
         u_0 = jnp.diag(mat).mean()
         p_r = jnp.ones(width)
@@ -99,7 +98,7 @@ def model():
         lmbd_b = jnp.array(0.01)
         sticky = jnp.ones(width)*0.01
         if stickiness_carry is not None:
-            sticky = sticky * stickiness_carry
+            sticky = sticky.at[:len(stickiness_carry)].set(stickiness_carry)
         return u_0, p_r, p_l, lmbd, lmbd_b, sticky
 
     def model_init_whole(size):
@@ -119,7 +118,10 @@ def model():
                 lmbd_b:ArrayLike,
                 slow_down:ArrayLike) -> float:
         mat_model = hic(mat.shape[0], u_0, p_r, p_l, lmbd, lmbd_b, slow_down)
-        return jnp.mean(jnp.power(jnp.triu(mat - mat_model, 1), 2))
+        mat_diff = mat - mat_model
+        return jnp.mean(jnp.power(jnp.triu(mat_diff, diag_start) - jnp.triu(mat_diff, diag_end + 1),
+                                  2)
+                        )
 
     val_grad_l2_loss = jax.jit(jax.value_and_grad(l2_loss, argnums = (1, 2, 3, 4, 5, 6)))
 
