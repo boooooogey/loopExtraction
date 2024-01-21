@@ -110,7 +110,7 @@ def model(diag_start:int, diag_end:int):
                 np.zeros(size))
 
     @jax.jit
-    def l2_loss(mat:ArrayLike,
+    def mse_loss(mat:ArrayLike,
                 u_0:ArrayLike,
                 p_r:ArrayLike,
                 p_l:ArrayLike,
@@ -119,14 +119,15 @@ def model(diag_start:int, diag_end:int):
                 slow_down:ArrayLike) -> float:
         mat_model = hic(mat.shape[0], u_0, p_r, p_l, lmbd, lmbd_b, slow_down)
         mat_diff = mat - mat_model
-        return jnp.mean(jnp.power(jnp.triu(mat_diff, diag_start) - jnp.triu(mat_diff, diag_end + 1),
-                                  2)
-                        )
+        #return jnp.mean(jnp.power(jnp.triu(mat_diff, diag_start) - jnp.triu(mat_diff, diag_end + 1),
+        #                          2)
+        #                )
+        return jnp.mean(jnp.power(jnp.triu(mat_diff, diag_start), 2))
 
-    val_grad_l2_loss = jax.jit(jax.value_and_grad(l2_loss, argnums = (1, 2, 3, 4, 5, 6)))
+    val_grad_l2_loss = jax.jit(jax.value_and_grad(mse_loss, argnums = (1, 2, 3, 4, 5, 6)))
 
     def pass_carry(params:Parameters, overlap:int) -> ArrayLike:
         return params[5][-overlap:]
 
     return val_grad_l2_loss, model_init, model_init_whole, parameter_transformation, \
-            write_parameters, pass_carry
+            write_parameters, pass_carry, hic
