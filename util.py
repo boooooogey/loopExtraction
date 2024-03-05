@@ -8,6 +8,8 @@ from jax.typing import ArrayLike
 import jax.numpy as jnp
 import numpy as np
 import optax
+import matplotlib.pyplot as plt
+from typing import Any, Tuple
 
 def progressbar(it, prefix="", size:int = 60, out=sys.stdout):
     """Prints a progressbar for the iterator given.
@@ -37,6 +39,35 @@ def progressbar(it, prefix="", size:int = 60, out=sys.stdout):
         yield item
         show(i+1)
     print("\n", flush=True, file=out)
+
+def plot_results(start:int, end:int, patch:ArrayLike, pred:ArrayLike,
+                 params:Tuple, axes:Any = None):
+    """Plot results of the fit.
+
+    Args:
+        start (int): start index
+        end (int): end index 
+        patch (ArrayLike): input data
+        pred (ArrayLike): model prediction 
+        params (Tuple): parameters of the model. 
+        axes (Any, optional): can be used to integrate into a bigger image. Defaults to None.
+    """
+    plot_mat = patch + jnp.triu(pred, 1).T
+    if axes is None:
+        fig, axes = plt.subplots(nrows=3, ncols=2, figsize=(12,14),
+                                    sharex='col',
+                                    sharey='row',
+                                    gridspec_kw={'wspace':0,
+                                                'hspace':0,
+                                                'height_ratios':[10, 50, 10],
+                                                'width_ratios':[50, 10]})
+    axes[0, 1].remove()
+    axes[2, 1].remove()
+    axes[0, 0].plot(np.arange(end-start), params[1][start:end])
+    axes[1, 0].matshow(plot_mat[start:end, start:end])
+    axes[1, 1].plot(params[0][start:end], np.arange(end-start))
+    axes[2, 0].plot(np.arange(end-start), params[2][start:end])
+
 
 def triu_indexing(n:int, start:int, end:int) -> ArrayLike:
     """Return the indices from the start diagonal until the end diagonal of a n x n matrix.
