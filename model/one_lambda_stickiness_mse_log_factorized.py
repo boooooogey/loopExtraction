@@ -16,10 +16,6 @@ def model(n_loci:int, diag_start:int):
     """Returns needed functions to fit the model on a hic matrix of a single chromosome.
     """
 
-    mat_range = jnp.arange(n_loci)
-    independent_contacts = jnp.abs(mat_range.reshape(1,-1) - mat_range.reshape(-1, 1) + 1)
-    independent_contacts = jnp.triu(jnp.log(independent_contacts)) * -3.0/2.0
-
     def parameter_transformation(parameters:Parameters) -> Parameters:
         def sigmoid(x):
             return 1/(1+np.exp(-x))
@@ -64,13 +60,11 @@ def model(n_loci:int, diag_start:int):
         return jnp.cumsum(c_r, axis = 1)
 
     @jax.jit
-    def hic(u_0:ArrayLike,
-            p_r:ArrayLike,
+    def hic(p_r:ArrayLike,
             p_l:ArrayLike,
             lmbd:ArrayLike,
             sticky:ArrayLike,
-            norms:ArrayLike,
-            a:ArrayLike) -> ArrayLike:
+            norms:ArrayLike) -> ArrayLike:
         """
         Constraint p and l
         u_0: initial concentration
@@ -85,31 +79,62 @@ def model(n_loci:int, diag_start:int):
         v_max = 0.0
         p_r, p_l = (jax.nn.log_sigmoid(i) for i in (p_r, p_l))
         lmbd = jax.nn.log_sigmoid(lmbd)
-        #norms = jax.nn.softplus(norms)
 
-        contact_r = calc_contact_l(u_0/2, p_l, lmbd, h, v_max)
+        hic_r = calc_contact_l(jnp.log(0.5), p_l, lmbd, h, v_max)
 
-        contact_l = calc_contact_r(u_0/2, p_r, lmbd, h, v_max)
+        hic_l = calc_contact_r(jnp.log(0.5), p_r, lmbd, h, v_max)
+
+        hic = logsumexp(hic_l, hic_r)
 
         s_out = jnp.outer(sticky, sticky)
-        #hic = logsumexp(hic, a * independent_contacts) + s_out #logsumexp1(s_out)
-        return contact_l, contact_r, s_out# hic #diag_scale_log(hic, norms)
+        hic = hic + s_out
+        return hic #diag_scale_log(hic, norms)
+
+    @jax.jit
+    def hic_debug(u_0:ArrayLike,
+                  p_r:ArrayLike,
+            p_l:ArrayLike,
+            lmbd:ArrayLike,
+            sticky:ArrayLike,
+            norms:ArrayLike) -> ArrayLike:
+        """
+        Constraint p and l
+        u_0: initial concentration
+        p_r: slowdown of the right leg (exp CTCF)
+        p_l: slowdown of the left leg (exp CTCF)
+        lmbd_r: sequence specific decay of the right leg
+        lmbd_l: sequence specific decay of the left leg
+        lmbd_b: background decay    
+        sticky: stickiness of the chromatin in BOTH directions
+        """
+        h = 0.0
+        v_max = 0.0
+        p_r, p_l = (jax.nn.log_sigmoid(i) for i in (p_r, p_l))
+        lmbd = jax.nn.log_sigmoid(lmbd)
+
+        hic_r = calc_contact_l(u_0, p_l, lmbd, h, v_max)
+
+        hic_l = calc_contact_r(u_0, p_r, lmbd, h, v_max)
+
+        hic = logsumexp(hic_l, hic_r)
+
+        s_out = jnp.outer(sticky, sticky)
+        hic = hic + s_out
+        return hic #diag_scale_log(hic, norms)
 
     def model_init(mat:ArrayLike,
                          stickiness_carry:Union[ArrayLike, None] = None) -> Parameters:
         width = mat.shape[0]
-        u_0 = jnp.diag(mat).mean()
+        u_0 = jnp.array(1.0)
         p_r = jnp.ones(width) * 4.5
         p_l = jnp.ones(width) * 4.5
         lmbd = jnp.ones(width) * -4.0
-        norms = diag_mean_log(mat)
         #lmbd = jnp.array(-4.0)
-        sticky = jnp.ones(width) * 0.01
-        a = jnp.array(-3.0/2.0)
-        #a = jnp.array(1.0)
+        norms = diag_mean_log(mat)
+        sticky = jnp.ones(width) * 1e-6 
         if stickiness_carry is not None:
             sticky = sticky.at[:len(stickiness_carry)].set(stickiness_carry)
-        return u_0, p_r, p_l, lmbd, sticky, norms, a
+        return p_r, p_l, lmbd, sticky, norms
 
     def model_init_whole(size):
         return (np.zeros(size),
@@ -119,32 +144,37 @@ def model(n_loci:int, diag_start:int):
                 np.zeros(size))
 
     @jax.jit
-    def mse_loss(a, b, offset):
-        loci_n = a.shape[0] - offset 
-        loci_n = loci_n * (loci_n+1) / 2
-        return jnp.sum(jnp.power(jnp.triu(a - b, offset), 2)) / loci_n
+    def kl_loss(mat:ArrayLike,
+                mat_model:ArrayLike) -> float:
+        mat_diag_normed = diag_scale_log(mat, -jnp.log(jnp.arange(mat.shape[0])+1)[::-1])
+        mat_model_diag_normed = diag_scale_log(mat_model, -jnp.log(jnp.arange(mat.shape[0])+1)[::-1])
+        kl = jnp.exp(mat_diag_normed) * (mat_diag_normed - mat_model_diag_normed)
+        return jnp.sum(jnp.triu(kl, diag_start))
 
     @jax.jit
-    def loss_total(mat:ArrayLike,
-                   u_0:ArrayLike,
-                   p_r:ArrayLike,
-                   p_l:ArrayLike,
-                   lmbd:ArrayLike,
-                   slow_down:ArrayLike,
-                   norms:ArrayLike,
-                   a:ArrayLike) -> float:
-        contact_l, contact_r, sticky = hic(u_0, p_r, p_l, lmbd, slow_down, norms, a)
-        mat_half = mat - 2
-        res = mat - logsumexp(contact_l, contact_r)
-        l1 = mse_loss(contact_l, mat_half, diag_start)
-        l2 = mse_loss(contact_r, mat_half, diag_start)
-        l3 = mse_loss(res, sticky, diag_start)
-        return l1 + l2 + l3
+    def normed_loss(mat:ArrayLike,
+                    mat_model:ArrayLike) -> float:
+        diffp2 = 2 * logabssubexp(mat, mat_model)
+        diffp2 = diffp2.at[jnp.tril_indices_from(diffp2, diag_start-1)].set(-jnp.inf)
+        total_loci = n_loci - diag_start
+        total_loci = total_loci * (total_loci+1) / 2
+        return jnp.exp(jax.scipy.special.logsumexp(diffp2) - jnp.log(total_loci))
 
-    val_grad_l2_loss = jax.jit(jax.value_and_grad(loss_total, argnums = (1, 2, 3, 4, 5, 6, 7)))
+    @jax.jit
+    def factorized_loss(mat:ArrayLike,
+                        p_r:ArrayLike,
+                        p_l:ArrayLike,
+                        lmbd:ArrayLike,
+                        sticky:ArrayLike,
+                        norms:ArrayLike) -> float:
+        mat_model = hic(p_r, p_l, lmbd, sticky, norms)
+        return kl_loss(mat, mat_model)# + normed_loss(mat, mat_model)
+
+    val_grad_factorized_loss = jax.jit(jax.value_and_grad(factorized_loss, argnums = (1, 2, 3, 4, 5)))
+    #val_grad_l2_loss = jax.jit(jax.value_and_grad(kl_loss, argnums = (1, 2, 3, 4, 5, 6)))
 
     def pass_carry(params:Parameters, overlap:int) -> ArrayLike:
         return params[5][-overlap:]
 
-    return val_grad_l2_loss, model_init, model_init_whole, parameter_transformation, \
-            write_parameters, pass_carry, hic
+    return val_grad_factorized_loss, model_init, model_init_whole, parameter_transformation, \
+            write_parameters, pass_carry, hic, kl_loss, normed_loss, hic_debug

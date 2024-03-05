@@ -8,7 +8,7 @@ from jax.typing import ArrayLike
 import numpy as np
 import pandas as pd
 from pandas import DataFrame
-from log_func import *
+from func import *
 
 Parameters = Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike, ArrayLike, ArrayLike]
 
@@ -48,24 +48,21 @@ def model(n_loci:int, diag_start:int):
         divisor_l = logsumexp(p_l, lmbd + h - v_max)
         multiplier_l = p_l - jnp.roll(divisor_l, 1)
         c_l = jnp.triu(multiplier_l.reshape(1, -1).repeat(n_loci, axis=0), 1)
-        c_l = c_l.at[jnp.diag_indices_from(c_l)].set(u_0)
-        return jnp.cumsum(c_l, axis = 1)
+        return jnp.cumsum(c_l, axis = 1) + u_0.reshape(-1, 1)
 
     @jax.jit
     def calc_contact_r(u_0, p_r, lmbd, h, v_max):
         divisor_r = logsumexp(p_r, lmbd + h - v_max)
         multiplier_r = jnp.roll(p_r, 1) - divisor_r
         c_r = jnp.triu(multiplier_r.reshape(1, -1).repeat(n_loci, axis=0), 1)
-        c_r = c_r.at[jnp.diag_indices_from(c_r)].set(u_0)
-        return jnp.cumsum(c_r, axis = 1)
+        return jnp.cumsum(c_r, axis = 1) + u_0.reshape(1, -1)
 
     @jax.jit
     def hic(u_0:ArrayLike,
             p_r:ArrayLike,
             p_l:ArrayLike,
             lmbd:ArrayLike,
-            sticky:ArrayLike,
-            norms:ArrayLike) -> ArrayLike:
+            sticky:ArrayLike) -> ArrayLike:
         """
         Constraint p and l
         u_0: initial concentration
@@ -82,30 +79,25 @@ def model(n_loci:int, diag_start:int):
         lmbd = jax.nn.log_sigmoid(lmbd)
         #norms = jax.nn.softplus(norms)
 
-        hic_r = calc_contact_l(u_0/2, p_l, lmbd, h, v_max)
+        contact_r = calc_contact_l(u_0/2, p_l, lmbd, h, v_max)
 
-        hic_l = calc_contact_r(u_0/2, p_r, lmbd, h, v_max)
-
-        hic = logsumexp(hic_l, hic_r)
+        contact_l = calc_contact_r(u_0/2, p_r, lmbd, h, v_max)
 
         s_out = jnp.outer(sticky, sticky)
-        hic = hic + s_out #logsumexp1(s_out)
-        return hic
-        #return diag_scale_log(hic, norms)
+        return contact_l, contact_r, s_out
 
-    def model_init(mat:ArrayLike,
-                         stickiness_carry:Union[ArrayLike, None] = None) -> Parameters:
+    def model_init(mat:ArrayLike, stickiness_carry:Union[ArrayLike, None] = None) -> Parameters:
         width = mat.shape[0]
         u_0 = jnp.diag(mat).mean()
         p_r = jnp.ones(width) * 4.5
         p_l = jnp.ones(width) * 4.5
-        #lmbd = jnp.ones(width) * -4.0
-        lmbd = jnp.array(-4.0)
-        norms = diag_mean_log(mat)
-        sticky = jnp.ones(width) * 0.01
+        lmbd = jnp.ones(width) * -4.0
+        #lmbd = jnp.array(-4.0)
+        #norms = diag_mean_log(mat)
+        sticky = jnp.ones(width) * 1e-4 
         if stickiness_carry is not None:
             sticky = sticky.at[:len(stickiness_carry)].set(stickiness_carry)
-        return u_0, p_r, p_l, lmbd, sticky, norms
+        return u_0, p_r, p_l, lmbd, sticky
 
     def model_init_whole(size):
         return (np.zeros(size),
@@ -115,38 +107,52 @@ def model(n_loci:int, diag_start:int):
                 np.zeros(size))
 
     @jax.jit
-    def mse_loss(mat:ArrayLike,
-                u_0:ArrayLike,
-                p_r:ArrayLike,
-                p_l:ArrayLike,
-                lmbd:ArrayLike,
-                slow_down:ArrayLike,
-                norms:ArrayLike) -> float:
-        mat_model = hic(u_0, p_r, p_l, lmbd, slow_down, norms)
-        mat_diff = mat - mat_model
-        total_loci = n_loci - diag_start
-        total_loci = total_loci * (total_loci+1) / 2
-        return jnp.sum(jnp.power(jnp.triu(mat_diff, diag_start), 2)) / total_loci
+    def mse_loss(a, b, weight):
+        loci_n = a.shape[0] - diag_start
+        loci_n = loci_n * (loci_n+1) / 2
+        #return jax.scipy.special.logsumexp(weight * jnp.triu(2 * logabssubexp(a, b), diag_start)) - loci_n
+        return jnp.sum(weight * jnp.triu(jnp.power(a - b, 2), diag_start)) / loci_n
 
     @jax.jit
-    def kl_loss(mat:ArrayLike,
+    def total_loss(mat:ArrayLike,
                 u_0:ArrayLike,
                 p_r:ArrayLike,
                 p_l:ArrayLike,
                 lmbd:ArrayLike,
                 slow_down:ArrayLike,
-                norms:ArrayLike) -> float:
-        mat_model = hic(u_0, p_r, p_l, lmbd, slow_down, norms)
-        mat_diff = mat - mat_model
-        total_loci = n_loci - diag_start
-        total_loci = total_loci * (total_loci+1) / 2
-        return jnp.sum(jnp.triu(jnp.exp(mat) * mat_diff, diag_start)) / total_loci
+                params:ArrayLike) -> float:
+        contact_l, contact_r, sticky = hic(u_0, p_r, p_l, lmbd, slow_down)
+        contact_l, contact_r  = (diag_normalize(i, params) for i in (contact_l, contact_r))
+        mat_half = mat - 2
+        res = mat - logsumexp(contact_l, contact_r)
+        weight = jnp.exp(mat_half) 
+        #weight = jnp.ones_like(mat_half) 
+        l1 = mse_loss(contact_l, mat_half, weight)
+        l2 = mse_loss(contact_r, mat_half, weight)
+        l3 = mse_loss(sticky, res, weight)
+        return l1 + l2 + l3
 
-    val_grad_l2_loss = jax.jit(jax.value_and_grad(mse_loss, argnums = (1, 2, 3, 4, 5, 6)))
-    #val_grad_l2_loss = jax.jit(jax.value_and_grad(kl_loss, argnums = (1, 2, 3, 4, 5, 6)))
+#    @jax.jit
+#    def res_loss(mat:ArrayLike,
+#                u_0:ArrayLike,
+#                p_r:ArrayLike,
+#                p_l:ArrayLike,
+#                lmbd:ArrayLike,
+#                slow_down:ArrayLike) -> float:
+#        contact_l, contact_r, sticky = hic(u_0, p_r, p_l, lmbd, slow_down)
+#        res = mat - logsumexp(contact_l, contact_r)
+#        l3 = mse_loss(res, sticky)
+#        return l3
+
+    val_grad_contact_loss = jax.jit(jax.value_and_grad(total_loss, argnums = (1, 2, 3, 4, 5)))
+#    val_grad_res_loss = jax.jit(jax.value_and_grad(res_loss, argnums = 5))
 
     def pass_carry(params:Parameters, overlap:int) -> ArrayLike:
         return params[5][-overlap:]
 
-    return val_grad_l2_loss, model_init, model_init_whole, parameter_transformation, \
-            write_parameters, pass_carry, hic
+    def crop_params(params:Parameters, crop_sides) -> Parameters:
+        return (params[0], *(i[crop_sides:-crop_sides] for i in params[1:]))
+
+    return val_grad_contact_loss, model_init, model_init_whole, \
+            parameter_transformation, write_parameters, pass_carry, hic, crop_params, \
+            total_loss
