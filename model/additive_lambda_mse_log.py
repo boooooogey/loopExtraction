@@ -57,18 +57,19 @@ def model(start_diag:int, end_diag:int):
         lmbd_b: background decay    
         sticky: stickiness of the chromatin in BOTH directions
         """
-        n = min(len(u_0), end_diag)-1
+        #n = min(len(u_0), end_diag)-1
+        n = len(u_0)-1
         #u_0 = jnp.zeros_like(u_0)
         @jax.jit
         def _inner(carry, x):
             left, right, slowdown_left, slowdown_right, prev_state = carry # ith diagonal
             nom = logsumexp(jnp.roll(prev_state, 1) + jnp.roll(left, 1), prev_state + right)
             right = jnp.roll(right, 1)
-            slowdown_left = jnp.roll(slowdown_left, 1)
+            slowdown_right = jnp.roll(slowdown_right, 1)
             denom = logsumexp(logsumexp(left , right), logsumexp(slowdown_left, slowdown_right))
             curr_state = nom - denom
             return (left, right, slowdown_left, slowdown_right, curr_state), curr_state
-        lmbd = jax.nn.log_sigmoid(lmbd)
+        #lmbd = jax.nn.log_sigmoid(lmbd)
         mat = jax.lax.scan(_inner,
                            (jax.nn.log_sigmoid(p_l),
                             jax.nn.log_sigmoid(p_r),
@@ -108,7 +109,9 @@ def model(start_diag:int, end_diag:int):
                    p_l:ArrayLike,
                    lmbd:ArrayLike) -> float:
         mat_pred = contactmap(u_0, p_r, p_l, lmbd)
-        return mse_loss(mat[:end_diag], mat_pred, jnp.exp(mat)[:end_diag])
+        #return mse_loss(mat[:end_diag], mat_pred[:end_diag], jnp.exp(mat)[:end_diag])
+        return mse_loss(mat[:end_diag], mat_pred[:end_diag], jnp.ones_like(mat)[:end_diag])
+        #return mse_loss(mat[:end_diag], mat_pred, jnp.ones_like(mat)[:end_diag])
 
     val_grad_contact_loss = jax.jit(jax.value_and_grad(total_loss, argnums = (2, 3, 4)))
 

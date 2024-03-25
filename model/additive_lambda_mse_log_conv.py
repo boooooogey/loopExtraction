@@ -46,7 +46,8 @@ def model(start_diag:int, end_diag:int):
     def contactmap(u_0:ArrayLike,
                    p_r:ArrayLike,
                    p_l:ArrayLike,
-                   lmbd:ArrayLike):
+                   lmbd:ArrayLike,
+                   kernel:ArrayLike):
         """
         Constraint p and l
         u_0: initial concentration
@@ -65,10 +66,10 @@ def model(start_diag:int, end_diag:int):
             left, right, slowdown_left, slowdown_right, prev_state = carry # ith diagonal
             nom = logsumexp(jnp.roll(prev_state, 1) + jnp.roll(left, 1), prev_state + right)
             right = jnp.roll(right, 1)
-            slowdown_left = jnp.roll(slowdown_left, 1)
-            denom = logsumexp(logsumexp(left , right), slowdown_left + slowdown_right)
+            slowdown_right = jnp.roll(slowdown_right, 1)
+            denom = logsumexp(logsumexp(left , right), logsumexp(slowdown_left, slowdown_right))
             curr_state = nom - denom
-            return (left, right, slowdown_left, slowdown_right, curr_state), curr_state 
+            return (left, right, slowdown_left, slowdown_right, curr_state), curr_state
         lmbd = jax.nn.log_sigmoid(lmbd)
         mat = jax.lax.scan(_inner,
                            (jax.nn.log_sigmoid(p_l),
@@ -78,16 +79,25 @@ def model(start_diag:int, end_diag:int):
                             u_0),
                            None,
                            length=n)[1]
-        return jnp.vstack([u_0, mat])
+        
+        out = jnp.vstack([u_0, mat])
+        out = jnp.triu(flip_diag_row(out))
+        out = out.at[jnp.tril_indices_from(out)].set(out.T[jnp.tril_indices_from(out)])
+        out = jax.scipy.signal.fftconvolve(out, kernel, mode="same")
+        #out = jax.scipy.signal.convolve2d(out, kernel, mode="same")
+        return flip_diag_row(out)
 
     def model_init(mat:ArrayLike) -> Parameters:
         width = mat.shape[0]
-        #u_0 = jnp.diag(mat)
-        u_0 = jnp.ones_like(jnp.diag(mat))
+        u_0 = jnp.diag(mat)
         p_r = jnp.ones(width) * 4.5
         p_l = jnp.ones(width) * 4.5
         lmbd = jnp.ones(width) * -4.0
-        return u_0, p_r, p_l, lmbd
+        s, e = -3,4
+        xs, ys = jnp.meshgrid(jnp.arange(s,e), jnp.arange(s,e))
+        dist = jnp.sqrt(jnp.power(xs, 2) + jnp.power(ys, 2))
+        kernel = 1/jnp.power(dist * 5 + 0.1, 3/4)
+        return u_0, p_r, p_l, lmbd, kernel
 
     def model_init_whole(size):
         return (np.zeros(size),
@@ -108,12 +118,13 @@ def model(start_diag:int, end_diag:int):
                    u_0:ArrayLike,
                    p_r:ArrayLike,
                    p_l:ArrayLike,
-                   lmbd:ArrayLike) -> float:
-        mat_pred = contactmap(u_0, p_r, p_l, lmbd)
+                   lmbd:ArrayLike,
+                   kernel) -> float:
+        mat_pred = contactmap(u_0, p_r, p_l, lmbd, kernel)
         return mse_loss(mat[:end_diag], mat_pred[:end_diag], jnp.exp(mat)[:end_diag])
-        #return mse_loss(mat[:end_diag], mat_pred, jnp.ones_like(mat)[:end_diag])
+        #return mse_loss(mat[:end_diag], mat_pred[:end_diag], jnp.ones_like(mat)[:end_diag])
 
-    val_grad_contact_loss = jax.jit(jax.value_and_grad(total_loss, argnums = (2, 3, 4)))
+    val_grad_contact_loss = jax.jit(jax.value_and_grad(total_loss, argnums = (2, 3, 4, 5)))
 
     def pass_carry(params:Parameters, overlap:int) -> ArrayLike:
         return params[5][-overlap:]
